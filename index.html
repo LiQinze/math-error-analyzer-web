@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>数学错题分析</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f0f2f5;color:#1d2129}
@@ -30,6 +31,7 @@
   .record-cause{font-size:13px;color:#555;margin-top:4px}
   .stats-bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .stat-pill{background:#fff;border:1px solid #d0d7de;border-radius:20px;padding:4px 12px;font-size:12px}
+  .chart{height:280px;margin-top:10px}
   .api-note{background:#e8f5e9;border:1px solid #c8e6c9;border-radius:8px;padding:12px;font-size:13px;color:#2e7d32;margin-bottom:16px}
   .history-title{font-size:16px;font-weight:600;margin-bottom:12px}
   .error-msg{background:#fff1f0;border:1px solid #ffccc7;border-radius:8px;padding:12px;font-size:13px;color:#cf1322;margin-top:8px}
@@ -55,9 +57,13 @@
 
   <div id="resultArea" class="card" style="display:none">
     <h2 style="font-size:16px;margin-bottom:12px">分析结果</h2>
+    <div class="result-item"><span class="result-label">状态</span><span class="result-value" id="rStatus"></span></div>
     <div class="result-item"><span class="result-label">科目/年级</span><span class="result-value" id="rGrade"></span></div>
     <div class="result-item"><span class="result-label">错误类型</span><span class="result-value"><span class="tag" id="rType"></span></span></div>
     <div class="result-item"><span class="result-label">知识点</span><span class="result-value" id="rKP"></span></div>
+    <div class="result-item"><span class="result-label">错误原因</span><span class="result-value" id="rReason"></span></div>
+    <div class="result-item"><span class="result-label">错误行为</span><span class="result-value" id="rBehavior"></span></div>
+    <div class="result-item"><span class="result-label">出错阶段</span><span class="result-value" id="rStage"></span></div>
     <div class="result-item"><span class="result-label">根因分析</span><span class="result-value" id="rCause"></span></div>
     <div class="result-item"><span class="result-label">正确解法</span><span class="result-value" id="rSolution"></span></div>
     <div class="result-item"><span class="result-label">记忆口诀</span><span class="result-value" id="rTip"></span></div>
@@ -66,8 +72,16 @@
   </div>
 
   <div class="card" style="margin-top:16px">
-    <div class="history-title">📊 今日统计</div>
+    <div class="history-title">📊 近 7 天统计</div>
     <div class="stats-bar" id="statsArea"></div>
+    <div id="chartTrend" class="chart"></div>
+    <div id="chartReason" class="chart"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="history-title">🧭 阶段性学习建议</div>
+    <button class="btn" style="margin-top:0" onclick="loadSummary()">生成 7 日建议</button>
+    <div id="summaryArea" style="font-size:14px;color:#333;line-height:1.6;margin-top:10px">暂未生成</div>
   </div>
 
   <div class="card" style="margin-top:16px">
@@ -77,14 +91,22 @@
 </div>
 
 <script>
-const API = "https://math-error-analyzer.onrender.com";
+const API = localStorage.getItem("MATH_API_BASE") || "https://math-error-analyzer.onrender.com";
 let file = null;
+let trendChart = null;
+let reasonChart = null;
 
 async function checkApi() {
   try {
-    const r = await fetch(API + "/api/stats");
+    const r = await fetch(API + "/health");
     if (r.ok) {
-      document.getElementById("apiStatus").innerHTML = "✅ 已连接";
+      const info = await r.json();
+      const dbOk = info.storage && info.storage.db_writable;
+      const modelOk = info.model && info.model.configured;
+      const provider = (info.model && info.model.providers || []).join(",");
+      document.getElementById("apiStatus").innerHTML =
+        (dbOk && modelOk ? "✅ 已连接" : "⚠️ 部分异常") +
+        "（模型: " + (provider || "未配置") + "）";
       loadStats(); loadHistory();
     }
   } catch(e) {
@@ -124,13 +146,9 @@ async function submit() {
       throw new Error("HTTP " + resp.status + ": " + errTxt);
     }
 
-    // 用 text() 而不是 json()，避免流式响应导致解析不完整
-    const rawText = await resp.text();
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch(e) {
-      throw new Error("返回数据解析失败: " + rawText.slice(0, 100));
+    const data = await resp.json();
+    if (data.status !== "completed" || !data.analysis) {
+      throw new Error("分析未完成，状态: " + (data.status || "unknown"));
     }
 
     showResult(data);
@@ -147,25 +165,55 @@ async function submit() {
 
 function showResult(d) {
   document.getElementById("resultArea").style.display = "block";
-  document.getElementById("rGrade").textContent = (d.subject||"") + " / " + (d.grade||"");
-  document.getElementById("rType").textContent = d.error_type||"";
-  document.getElementById("rKP").textContent = d.knowledge_point||"";
-  document.getElementById("rCause").textContent = d.root_cause||"";
-  document.getElementById("rSolution").textContent = d.correct_solution||"";
-  document.getElementById("rTip").textContent = d.memory_tip||"";
-  document.getElementById("rSimilar").textContent = Array.isArray(d.similar_problems) ? d.similar_problems.join("；") : "";
-  document.getElementById("rConf").textContent = d.confidence ? (d.confidence*100).toFixed(0) + "%" : "";
+  const a = d.analysis || {};
+  document.getElementById("rStatus").textContent = "已完成（#" + d.record_id + "）";
+  document.getElementById("rGrade").textContent = (a.subject||"") + " / " + (a.grade||"");
+  document.getElementById("rType").textContent = a.error_type||"";
+  document.getElementById("rKP").textContent = a.knowledge_point||"";
+  document.getElementById("rReason").textContent = a.error_reason||"";
+  document.getElementById("rBehavior").textContent = a.error_behavior||"";
+  document.getElementById("rStage").textContent = a.step_stage||"";
+  document.getElementById("rCause").textContent = a.root_cause||"";
+  document.getElementById("rSolution").textContent = a.correct_solution||"";
+  document.getElementById("rTip").textContent = a.memory_tip||"";
+  document.getElementById("rSimilar").textContent = Array.isArray(a.similar_problems) ? a.similar_problems.join("；") : "";
+  const conf = Number(a.confidence || 0);
+  document.getElementById("rConf").textContent = (conf*100).toFixed(0) + "%";
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
 async function loadStats() {
   try {
-    const resp = await fetch(API + "/api/stats");
+    const resp = await fetch(API + "/api/stats?days=7");
     const data = await resp.json();
-    document.getElementById("statsArea").innerHTML = data.length
-      ? data.map(s => '<span class="stat-pill">' + (s.error_type||"") + " ×" + s.count + "</span>").join("")
+    const types = data.error_types || [];
+    document.getElementById("statsArea").innerHTML = types.length
+      ? types.map(s => '<span class="stat-pill">' + (s.error_type||"") + " ×" + s.count + "</span>").join("")
       : "<span class='stat-pill'>暂无数据</span>";
+    renderCharts(data);
   } catch(e) {}
+}
+
+function renderCharts(data) {
+  if (!trendChart) trendChart = echarts.init(document.getElementById("chartTrend"));
+  if (!reasonChart) reasonChart = echarts.init(document.getElementById("chartReason"));
+  const trend = data.trend || [];
+  trendChart.setOption({
+    title: {text: "近 7 天错题数量"},
+    tooltip: {trigger: "axis"},
+    xAxis: {type: "category", data: trend.map(v => (v.day || "").slice(5))},
+    yAxis: {type: "value"},
+    series: [{name: "数量", type: "line", smooth: true, data: trend.map(v => v.total || 0)}]
+  });
+
+  const reasons = data.error_reasons || [];
+  reasonChart.setOption({
+    title: {text: "高频错误原因"},
+    tooltip: {trigger: "item"},
+    xAxis: {type: "category", axisLabel: {rotate: 20}, data: reasons.map(v => v.error_reason || "未知")},
+    yAxis: {type: "value"},
+    series: [{type: "bar", data: reasons.map(v => v.count || 0)}]
+  });
 }
 
 async function loadHistory() {
@@ -176,7 +224,7 @@ async function loadHistory() {
       ? data.slice(0,10).map(r =>
         '<div class="record-item">' +
           '<div class="record-meta">' + (r.created_at||"").slice(0,16) + " · <span class='tag'>" + (r.error_type||"") + "</span></div>" +
-          '<div class="record-kp">' + (r.knowledge_point||"") + "</div>" +
+          '<div class="record-kp">' + (r.knowledge_point||"") + " · " + (r.error_behavior||"") + "</div>" +
           '<div class="record-cause">' + (r.root_cause||"") + "</div>" +
         "</div>"
       ).join("")
@@ -184,7 +232,23 @@ async function loadHistory() {
   } catch(e) {}
 }
 
+async function loadSummary() {
+  document.getElementById("summaryArea").textContent = "正在生成建议...";
+  try {
+    const resp = await fetch(API + "/api/summary?days=7");
+    const data = await resp.json();
+    document.getElementById("summaryArea").textContent = data.advice || "未返回建议";
+  } catch(e) {
+    document.getElementById("summaryArea").textContent = "生成失败: " + e.message;
+  }
+}
+
 checkApi();
+window.addEventListener("resize", function () {
+  if (trendChart) trendChart.resize();
+  if (reasonChart) reasonChart.resize();
+});
+console.log("当前后端地址:", API, "（可在控制台执行 localStorage.setItem('MATH_API_BASE','你的地址') 后刷新）");
 </script>
 </body>
 </html>
