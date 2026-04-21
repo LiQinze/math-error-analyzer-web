@@ -96,6 +96,25 @@ let file = null;
 let trendChart = null;
 let reasonChart = null;
 
+function analysisPayload(data) {
+  if (data && data.analysis && typeof data.analysis === "object") return data.analysis;
+  const skip = new Set(["record_id", "status", "errors", "request_id", "provider", "raw"]);
+  const out = {};
+  if (!data || typeof data !== "object") return out;
+  for (const k of Object.keys(data)) {
+    if (!skip.has(k)) out[k] = data[k];
+  }
+  return out;
+}
+
+function hasUsableAnalysis(data) {
+  const a = analysisPayload(data);
+  if (data && data.record_id != null) return true;
+  if (a.error_type || a.knowledge_point || a.root_cause || a.correct_solution) return true;
+  if (data && data.raw) return true;
+  return false;
+}
+
 async function checkApi() {
   try {
     const r = await fetch(API + "/health");
@@ -104,9 +123,11 @@ async function checkApi() {
       const dbOk = info.storage && info.storage.db_writable;
       const modelOk = info.model && info.model.configured;
       const provider = (info.model && info.model.providers || []).join(",");
-      document.getElementById("apiStatus").innerHTML =
-        (dbOk && modelOk ? "✅ 已连接" : "⚠️ 部分异常") +
-        "（模型: " + (provider || "未配置") + "）";
+      const line = dbOk && (modelOk !== false)
+        ? "✅ 已连接"
+        : "⚠️ 部分异常";
+      const extra = provider ? "（模型: " + provider + "）" : (modelOk === false ? "（未返回模型状态）" : "");
+      document.getElementById("apiStatus").innerHTML = line + extra;
       loadStats(); loadHistory();
     }
   } catch(e) {
@@ -147,8 +168,11 @@ async function submit() {
     }
 
     const data = await resp.json();
-    if (data.status !== "completed" || !data.analysis) {
-      throw new Error("分析未完成，状态: " + (data.status || "unknown"));
+    if (data.status === "failed" || (data.errors && data.errors.length)) {
+      throw new Error((data.errors && data.errors[0]) || data.detail || "分析失败");
+    }
+    if (!hasUsableAnalysis(data)) {
+      throw new Error("返回数据无法展示：缺少分析字段。请检查后端 /api/analyze 与前端是否版本一致。");
     }
 
     showResult(data);
@@ -165,15 +189,16 @@ async function submit() {
 
 function showResult(d) {
   document.getElementById("resultArea").style.display = "block";
-  const a = d.analysis || {};
-  document.getElementById("rStatus").textContent = "已完成（#" + d.record_id + "）";
+  const a = analysisPayload(d);
+  const rid = d.record_id != null ? d.record_id : "";
+  document.getElementById("rStatus").textContent = rid !== "" ? ("已完成（#" + rid + "）") : "已完成";
   document.getElementById("rGrade").textContent = (a.subject||"") + " / " + (a.grade||"");
   document.getElementById("rType").textContent = a.error_type||"";
   document.getElementById("rKP").textContent = a.knowledge_point||"";
   document.getElementById("rReason").textContent = a.error_reason||"";
   document.getElementById("rBehavior").textContent = a.error_behavior||"";
   document.getElementById("rStage").textContent = a.step_stage||"";
-  document.getElementById("rCause").textContent = a.root_cause||"";
+  document.getElementById("rCause").textContent = a.root_cause || (d.raw ? String(d.raw).slice(0, 500) : "");
   document.getElementById("rSolution").textContent = a.correct_solution||"";
   document.getElementById("rTip").textContent = a.memory_tip||"";
   document.getElementById("rSimilar").textContent = Array.isArray(a.similar_problems) ? a.similar_problems.join("；") : "";
